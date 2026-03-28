@@ -10,7 +10,7 @@ const PROCESSING_STEPS = [
   { id: 'done',      label: '✅ Complete' },
 ];
 
-export default function FileUploadZone({ onExtractionComplete }) {
+export default function FileUploadZone({ onExtractionComplete, phase = 'none', contextHistory = null }) {
   const [isDragging, setIsDragging]   = useState(false);
   const [files, setFiles]             = useState([]);
   const [status, setStatus]           = useState('idle'); // idle | processing | success | error
@@ -46,6 +46,8 @@ export default function FileUploadZone({ onExtractionComplete }) {
     try {
       const formData = new FormData();
       filesArray.forEach(f => formData.append('documents', f));
+      formData.append('phase', phase);
+      if (contextHistory) formData.append('contextHistory', JSON.stringify(contextHistory));
 
       const response = await fetch('/api/ingest', {
         method: 'POST',
@@ -56,7 +58,8 @@ export default function FileUploadZone({ onExtractionComplete }) {
 
       if (!response.ok) {
         const msg = result?.error || `Server error (${response.status})`;
-        throw new Error(msg);
+        const det = result?.details ? `\nDetails: ${result.details}` : '';
+        throw new Error(msg + det);
       }
 
       await stepProm;
@@ -72,22 +75,30 @@ export default function FileUploadZone({ onExtractionComplete }) {
     }
   };
 
-  const processFiles = async (selectedFiles) => {
+  const processFiles = (selectedFiles) => {
     if (!selectedFiles || selectedFiles.length === 0) return;
 
-    const filesArray = Array.from(selectedFiles);
+    const newFiles = Array.from(selectedFiles);
     const validTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
-    const invalidFiles = filesArray.filter(f => !validTypes.includes(f.type));
+    const invalidFiles = newFiles.filter(f => !validTypes.includes(f.type));
 
     if (invalidFiles.length > 0) {
-      setStatus('error');
-      setErrorMessage(`Unsupported file type: "${invalidFiles[0].name}". Only PDF and images (JPG, PNG, WebP) are accepted.`);
-      return;
+      alert(`Unsupported file type: "${invalidFiles[0].name}". Only PDF and images (JPG, PNG, WebP) are accepted.`);
     }
 
-    setFiles(filesArray);
-    storedFiles.current = filesArray;
-    await runExtraction(filesArray);
+    const validNewFiles = newFiles.filter(f => validTypes.includes(f.type));
+    if (validNewFiles.length === 0) return;
+
+    // Accumulate files instead of overwriting
+    const updatedFiles = [...files, ...validNewFiles];
+    setFiles(updatedFiles);
+    storedFiles.current = updatedFiles;
+  };
+
+  const removeFile = (indexToRemove) => {
+    const updatedFiles = files.filter((_, idx) => idx !== indexToRemove);
+    setFiles(updatedFiles);
+    storedFiles.current = updatedFiles;
   };
 
   const handleDrop = useCallback((e) => {
@@ -120,33 +131,67 @@ export default function FileUploadZone({ onExtractionComplete }) {
 
       {/* ---- Idle: Drop zone ---- */}
       {status === 'idle' && (
-        <div
-          className={`relative overflow-hidden rounded-2xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center p-10 text-center cursor-pointer
-            ${isDragging
-              ? 'border-blue-400 bg-blue-500/10 scale-[1.02]'
-              : 'border-white/15 hover:border-blue-500/50 hover:bg-white/5 glass-panel'}
-          `}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          onClick={() => document.getElementById('file-upload').click()}
-        >
-          <div className="w-16 h-16 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 mb-5 transition-transform">
-            <UploadCloud size={32} />
+        <div className="space-y-4">
+          <div
+            className={`relative overflow-hidden rounded-2xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center p-10 text-center cursor-pointer
+              ${isDragging
+                ? 'border-blue-400 bg-blue-500/10 scale-[1.02]'
+                : 'border-white/15 hover:border-blue-500/50 hover:bg-white/5 glass-panel'}
+            `}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onClick={() => document.getElementById('file-upload').click()}
+          >
+            <div className="w-16 h-16 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400 mb-5 transition-transform">
+              <UploadCloud size={32} />
+            </div>
+            <h3 className="text-lg font-semibold mb-1">Upload Medical Records</h3>
+            <p className="text-slate-400 text-sm max-w-xs">
+              Drag & drop PDFs, scans, or handwritten photos (JPG/PNG).<br/>
+              <span className="text-slate-500">Multiple files supported.</span>
+            </p>
+            <input
+              type="file"
+              id="file-upload"
+              className="hidden"
+              accept=".pdf,image/png,image/jpeg,image/webp"
+              multiple
+              onChange={handleFileInput}
+            />
           </div>
-          <h3 className="text-lg font-semibold mb-1">Upload Medical Records</h3>
-          <p className="text-slate-400 text-sm max-w-xs">
-            Drag & drop PDFs, scans, or handwritten photos (JPG/PNG).<br/>
-            <span className="text-slate-500">Multiple files supported.</span>
-          </p>
-          <input
-            type="file"
-            id="file-upload"
-            className="hidden"
-            accept=".pdf,image/png,image/jpeg,image/webp"
-            multiple
-            onChange={handleFileInput}
-          />
+
+          {files.length > 0 && (
+            <div className="glass-panel p-5 animate-fade-in border-blue-500/20">
+              <div className="flex justify-between items-center border-b border-white/10 pb-3 mb-4">
+                <h4 className="text-sm font-semibold flex items-center gap-2">
+                  <File size={16} className="text-blue-400"/> Selected Documents 
+                  <span className="bg-slate-800 text-xs px-2 py-0.5 rounded-full">{files.length}</span>
+                </h4>
+                <button onClick={resetUpload} className="text-xs text-slate-500 hover:text-red-400 transition-colors">Clear All</button>
+              </div>
+              <div className="flex flex-col gap-2 mb-5 max-h-[160px] overflow-y-auto pr-2">
+                {files.map((f, i) => (
+                  <div key={i} className="flex items-center justify-between bg-slate-900/60 border border-white/5 p-2 rounded-lg pl-3 hover:border-white/20 transition-colors group">
+                    <span className="text-xs text-slate-300 truncate pr-4">📄 {f.name}</span>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); removeFile(i); }} 
+                      className="text-slate-500 hover:text-red-400 opacity-50 group-hover:opacity-100 transition-all shrink-0 p-1 bg-black/40 rounded-md"
+                      title="Remove file"
+                    >
+                      <X size={14}/>
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <button 
+                onClick={() => runExtraction(files)}
+                className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 shadow-lg hover:scale-[1.01] transition-all"
+              >
+                Proceed to Processing ({files.length})
+              </button>
+            </div>
+          )}
         </div>
       )}
 

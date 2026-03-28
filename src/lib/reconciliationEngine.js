@@ -62,7 +62,7 @@ export function runReconciliationRules(extractedEntities) {
           severity: 'critical',
           category: 'REVENUE LOSS DETECTED',
           message: `Lab '${lab.test_name}' (LOINC ${loinc}) performed but CPT ${mapping.cpt} not billed.`,
-          action: `Add CPT ${mapping.cpt} to claim. Estimated lost revenue: $${mapping.revenue.toFixed(1)}`,
+          action: `Add CPT ${mapping.cpt} to claim. Estimated lost revenue: ₹${mapping.revenue.toFixed(1)}`,
           amount: mapping.revenue,
         });
       }
@@ -77,7 +77,7 @@ export function runReconciliationRules(extractedEntities) {
       severity: 'critical',
       category: 'REVENUE LOSS DETECTED',
       message: `${conditions.length} documented condition(s) but ZERO claims on record.`,
-      action: `Add Evaluation & Management (E&M) claim code. Estimated lost revenue: $${rev.toFixed(1)}`,
+      action: `Add Evaluation & Management (E&M) claim code. Estimated lost revenue: ₹${rev.toFixed(1)}`,
       amount: rev,
     });
   }
@@ -96,7 +96,7 @@ export function runReconciliationRules(extractedEntities) {
           severity: 'high',
           category: 'MISSING REQUIRED CODE',
           message: `Condition '${cond.condition}' (${code}) typically requires CPT ${rule.cpt} — not found in claims.`,
-          action: `Add ${rule.name} (CPT ${rule.cpt}). Estimated lost revenue: $${rule.revenue.toFixed(1)}`,
+          action: `Add ${rule.name} (CPT ${rule.cpt}). Estimated lost revenue: ₹${rule.revenue.toFixed(1)}`,
           amount: rule.revenue,
         });
       }
@@ -127,7 +127,7 @@ export function runReconciliationRules(extractedEntities) {
           severity: 'critical',
           category: 'REVENUE LOSS DETECTED',
           message: `Surgical procedure '${proc.procedure}' detected with no matching claim code.`,
-          action: `Add CPT ${proc.cpt_guess || 'code'} to claim. Estimated lost revenue: $${rev.toFixed(1)}`,
+          action: `Add CPT ${proc.cpt_guess || 'code'} to claim. Estimated lost revenue: ₹${rev.toFixed(1)}`,
           amount: rev,
         });
       }
@@ -140,23 +140,72 @@ export function runReconciliationRules(extractedEntities) {
       issues.push({
         severity: 'medium',
         category: 'FINANCIAL ANOMALY',
-        message: `Claim for '${claim.service}' has a $0 or missing billed amount.`,
+        message: `Claim for '${claim.service}' has a ₹0 or missing billed amount.`,
         action: `Verify pricing for this service and update claim before submission.`,
         amount: 0,
       });
     }
   });
 
+  // ── Rule 7: Payment vs Approved Discrepancy (Insurance Validation) ────────
+  const fin = extractedEntities.financial_summary || {};
+  const ins = extractedEntities.insurance_workflow || {};
+  
+  const parseAmt = (val) => {
+    if (val === null || val === undefined) return null;
+    const num = parseFloat(String(val).replace(/[^0-9.-]+/g, ''));
+    return isNaN(num) ? null : num;
+  };
+  
+  const billedAmt = parseAmt(fin.total_billed_amount);
+  const approvedAmt = parseAmt(ins.approved_amount);
+  const paidAmt = parseAmt(ins.paid_amount);
+
+  if (paidAmt !== null && approvedAmt !== null && paidAmt !== approvedAmt) {
+     issues.push({
+       severity: 'critical',
+       category: 'PAYMENT DISCREPANCY',
+       message: `Insurance paid ₹${paidAmt} but approved amount was ₹${approvedAmt}.`,
+       action: `Investigate short pay. Recover ₹${Math.abs(approvedAmt - paidAmt).toFixed(2)}`,
+       amount: Math.abs(approvedAmt - paidAmt)
+     });
+  }
+
+  // ── Rule 8: Allowed vs Billed (Overbilling / Denial) ──────────────────────
+  if (approvedAmt !== null && billedAmt !== null && approvedAmt < billedAmt) {
+     issues.push({
+       severity: 'high',
+       category: 'INSURANCE DENIAL ROUNDING',
+       message: `Insurance approved ₹${approvedAmt} against billed ₹${billedAmt}.`,
+       action: `Review Explanation of Benefits (EOB) for denied line items (₹${(billedAmt - approvedAmt).toFixed(2)} loss)`,
+       amount: billedAmt - approvedAmt
+     });
+  }
+
   // ── Summary issue (always inserted first) ────────────────────────────────
   if (totalRevOpportunity > 0) {
     issues.unshift({
       severity: 'info',
       category: 'RCM INSIGHT SUMMARY',
-      message: `Total estimated revenue capture opportunity: $${totalRevOpportunity.toFixed(1)}`,
+      message: `Total estimated revenue capture opportunity: ₹${totalRevOpportunity.toFixed(1)}`,
       action: `Approve all detected billing additions`,
       amount: totalRevOpportunity,
     });
   }
 
-  return issues;
+  // ── Compute Cross-Validation Engine Flags ───────────────────────────────
+  const isDiagnosisValid = conditions.length > 0; 
+  // Billing is justified if there are no Billing/Financial issues and we actually have procedures billed
+  const isBillingJustified = issues.filter(i => i.category === 'BILLING MISMATCH' || i.category === 'FINANCIAL ANOMALY').length === 0;
+  // Payment is correct if paid matches approved
+  const isPaymentCorrect = paidAmt !== null && approvedAmt !== null && paidAmt === approvedAmt;
+
+  return {
+    issues,
+    validationSummary: {
+      isDiagnosisValid,
+      isBillingJustified,
+      isPaymentCorrect
+    }
+  };
 }
